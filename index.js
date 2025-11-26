@@ -43,12 +43,19 @@ const mongoOptions = {
   socketTimeoutMS: 45000,
 };
 
-mongoose.connect(process.env.MONGO_URI, mongoOptions)
-  .then(() => console.log('✅ MongoDB Connected Successfully'))
-  .catch((err) => {
-    console.error('❌ MongoDB Connection Error:', err);
-    process.exit(1); // Exit process if DB connection fails
-  });
+// MongoDB Connection with better error handling
+if (process.env.MONGO_URI) {
+  mongoose.connect(process.env.MONGO_URI, mongoOptions)
+    .then(() => console.log('✅ MongoDB Connected Successfully'))
+    .catch((err) => {
+      console.error('❌ MongoDB Connection Error:', err.message);
+      console.error('⚠️ Server will continue but database operations will fail');
+      // Don't exit - allow server to run without DB for testing
+    });
+} else {
+  console.warn('⚠️ MONGO_URI not found in environment variables');
+  console.warn('⚠️ Server will run but database operations will fail');
+}
 
 // Global Error Handler for Promises
 process.on('unhandledRejection', (err, promise) => {
