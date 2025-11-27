@@ -13,7 +13,7 @@ const logger = require('./utils/logger');
 const app = express();
 const port = process.env.PORT || 5000;
 
-// CORS Configuration - More secure
+// CORS Configuration - Updated for Vercel
 const corsOptions = {
   origin: function (origin, callback) {
     // Allow requests with no origin (like mobile apps or curl requests)
@@ -21,36 +21,34 @@ const corsOptions = {
 
     const allowedOrigins = process.env.ALLOWED_ORIGINS
       ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
-      : [
-        'http://localhost:3000',
-        'http://localhost:3001',
-        'http://localhost:3002',
-        'https://tech-gear-client.vercel.app'
-      ];
+      : [];
 
-    // Check if origin matches allowed origins or Vercel preview URLs
-    const isAllowed = allowedOrigins.some(allowed => {
-      if (allowed.includes('*')) {
-        // Convert wildcard to regex
-        const pattern = allowed.replace(/\*/g, '.*');
-        return new RegExp(`^${pattern}$`).test(origin);
-      }
-      return allowed === origin;
-    });
+    // Add default localhosts
+    const defaultOrigins = [
+      'http://localhost:3000',
+      'http://localhost:3001',
+      'http://localhost:3002'
+    ];
 
-    // Also allow all Vercel preview URLs
-    const isVercelPreview = origin.includes('.vercel.app');
+    // Check if origin is allowed
+    const isAllowed =
+      allowedOrigins.includes(origin) ||
+      defaultOrigins.includes(origin) ||
+      origin.endsWith('.vercel.app'); // Allow ALL vercel.app subdomains
 
-    if (isAllowed || isVercelPreview) {
+    if (isAllowed) {
       callback(null, true);
     } else {
+      logger.warn(`Blocked by CORS: ${origin}`);
+      // For debugging, temporarily allow even if not matched (optional, but helps debug)
+      // callback(null, true); 
       callback(new Error('Not allowed by CORS'));
     }
   },
   credentials: true,
   optionsSuccessStatus: 200,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept']
 };
 
 // Middleware
