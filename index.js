@@ -8,20 +8,45 @@ const User = require('./models/User');
 const { validateProduct, validateUserRegistration } = require('./middleware/validation');
 const { verifyAuth, requireAdmin } = require('./middleware/auth');
 const { apiLimiter, authLimiter, productWriteLimiter } = require('./middleware/rateLimit');
+const logger = require('./utils/logger');
 
 const app = express();
 const port = process.env.PORT || 5000;
 
 // CORS Configuration - More secure
 const corsOptions = {
-  origin: process.env.ALLOWED_ORIGINS
-    ? process.env.ALLOWED_ORIGINS.split(',').map(origin => origin.trim())
-    : [
-      'http://localhost:3000',
-      'http://localhost:3001',
-      'http://localhost:3002',
-      'https://tech-gear-client.vercel.app'
-    ], // Default allowed origins
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+
+    const allowedOrigins = process.env.ALLOWED_ORIGINS
+      ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
+      : [
+        'http://localhost:3000',
+        'http://localhost:3001',
+        'http://localhost:3002',
+        'https://tech-gear-client.vercel.app'
+      ];
+
+    // Check if origin matches allowed origins or Vercel preview URLs
+    const isAllowed = allowedOrigins.some(allowed => {
+      if (allowed.includes('*')) {
+        // Convert wildcard to regex
+        const pattern = allowed.replace(/\*/g, '.*');
+        return new RegExp(`^${pattern}$`).test(origin);
+      }
+      return allowed === origin;
+    });
+
+    // Also allow all Vercel preview URLs
+    const isVercelPreview = origin.includes('.vercel.app');
+
+    if (isAllowed || isVercelPreview) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   credentials: true,
   optionsSuccessStatus: 200,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
@@ -35,31 +60,68 @@ app.use(express.json({ limit: '10mb' })); // Limit JSON payload size
 // Apply general rate limiting to all routes
 app.use(apiLimiter);
 
-// MongoDB Connection with better error handling
+// MongoDB Connection options
 const mongoOptions = {
   // Connection pool settings
   maxPoolSize: 10,
-  serverSelectionTimeoutMS: 5000,
+  minPoolSize: 2,
+  serverSelectionTimeoutMS: 10000, // 10 seconds
   socketTimeoutMS: 45000,
+  connectTimeoutMS: 10000,
+  heartbeatFrequencyMS: 10000,
+  retryWrites: true,
+  retryReads: true,
 };
 
 // MongoDB Connection with better error handling
-if (process.env.MONGO_URI) {
-  mongoose.connect(process.env.MONGO_URI, mongoOptions)
-    .then(() => console.log('✅ MongoDB Connected Successfully'))
-    .catch((err) => {
-      console.error('❌ MongoDB Connection Error:', err.message);
-      console.error('⚠️ Server will continue but database operations will fail');
-      // Don't exit - allow server to run without DB for testing
+const connectDB = async () => {
+  if (!process.env.MONGO_URI) {
+    logger.warn('MONGO_URI not found in environment variables');
+    logger.warn('Server will run but database operations will fail');
+    return;
+  }
+
+  try {
+    // Check if already connected
+    if (mongoose.connection.readyState === 1) {
+      logger.success('MongoDB Already Connected');
+      return;
+    }
+
+    await mongoose.connect(process.env.MONGO_URI, {
+      ...mongoOptions,
+      serverSelectionTimeoutMS: 10000, // 10 seconds
+      socketTimeoutMS: 45000,
+      connectTimeoutMS: 10000,
     });
-} else {
-  console.warn('⚠️ MONGO_URI not found in environment variables');
-  console.warn('⚠️ Server will run but database operations will fail');
-}
+
+    logger.success('MongoDB Connected Successfully');
+
+    // Handle connection events
+    mongoose.connection.on('error', (err) => {
+      logger.error('MongoDB Connection Error:', err.message);
+    });
+
+    mongoose.connection.on('disconnected', () => {
+      logger.warn('MongoDB Disconnected');
+    });
+
+    mongoose.connection.on('reconnected', () => {
+      logger.success('MongoDB Reconnected');
+    });
+
+  } catch (err) {
+    logger.error('MongoDB Connection Error:', err.message);
+    logger.error('Server will continue but database operations will fail');
+  }
+};
+
+// Connect to database
+connectDB();
 
 // Global Error Handler for Promises
 process.on('unhandledRejection', (err, promise) => {
-  console.error('❌ Unhandled Rejection at:', promise, 'reason:', err);
+  logger.error('Unhandled Rejection at:', promise, 'reason:', err);
 });
 
 // Routes
@@ -70,6 +132,25 @@ app.get('/', (req, res) => {
 // GET ALL PRODUCTS
 app.get('/products', async (req, res) => {
   try {
+    // Wait for MongoDB connection to be ready
+    if (mongoose.connection.readyState === 0) {
+      // Not connected, try to connect
+      await connectDB();
+    }
+
+    // Wait for connection to be established (max 5 seconds)
+    let attempts = 0;
+    while (mongoose.connection.readyState !== 1 && attempts < 10) {
+      await new Promise(resolve => setTimeout(resolve, 500));
+      attempts++;
+    }
+
+    if (mongoose.connection.readyState !== 1) {
+      return res.status(503).json({
+        message: 'Database connection unavailable. Please try again later.'
+      });
+    }
+
     const { search } = req.query;
     let query = {};
 
@@ -77,27 +158,58 @@ app.get('/products', async (req, res) => {
       query = { title: { $regex: search, $options: 'i' } };
     }
 
-    const products = await Product.find(query);
+    // Execute query with timeout
+    const products = await Product.find(query)
+      .maxTimeMS(8000) // 8 second timeout
+      .lean()
+      .exec();
+
     res.json(products);
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    logger.error('Error fetching products:', error.message);
+
+    if (error.name === 'MongoServerSelectionError' ||
+      error.name === 'MongoTimeoutError' ||
+      error.message.includes('buffering timed out')) {
+      return res.status(503).json({
+        message: 'Database connection timeout. Please try again later.'
+      });
+    }
+
+    res.status(500).json({ message: error.message || 'Failed to fetch products' });
   }
 });
 
 // GET PRODUCT BY ID
 app.get('/products/:id', async (req, res) => {
   try {
+    // Check MongoDB connection
+    if (mongoose.connection.readyState !== 1) {
+      return res.status(503).json({
+        message: 'Database connection unavailable. Please try again later.'
+      });
+    }
+
     // Validate MongoDB ObjectId format
     if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
       return res.status(400).json({ message: 'Invalid product ID format' });
     }
 
-    const product = await Product.findById(req.params.id);
+    const product = await Product.findById(req.params.id)
+      .maxTimeMS(8000)
+      .lean()
+      .exec();
+
     if (!product) {
       return res.status(404).json({ message: 'Product not found' });
     }
     res.json(product);
   } catch (error) {
+    if (error.name === 'MongoTimeoutError' || error.message.includes('buffering timed out')) {
+      return res.status(503).json({
+        message: 'Database connection timeout. Please try again later.'
+      });
+    }
     res.status(500).json({ message: error.message });
   }
 });
@@ -191,7 +303,7 @@ app.put('/products/:id', productWriteLimiter, verifyAuth, validateProduct, async
 
 if (require.main === module) {
   app.listen(port, () => {
-    console.log(`Server is running on port ${port}`);
+    logger.info(`Server is running on port ${port}`);
   });
 }
 

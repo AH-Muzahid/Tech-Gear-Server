@@ -1,6 +1,7 @@
 // Authentication middleware
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const logger = require('../utils/logger');
 
 const verifyAuth = async (req, res, next) => {
     try {
@@ -40,7 +41,7 @@ const verifyAuth = async (req, res, next) => {
             return res.status(401).json({ message: 'Unauthorized: Invalid or expired token' });
         }
     } catch (error) {
-        console.error('Auth middleware error:', error);
+        logger.error('Auth middleware error:', error);
         res.status(401).json({ message: 'Unauthorized: Authentication failed' });
     }
 };
